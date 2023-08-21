@@ -343,6 +343,7 @@ func initActualTypeData() {
 	IPProtocolMetadata[IPProtocolNoNextHeader] = EnumMetadata{DecodeWith: gopacket.DecodePayload, Name: "NoNextHeader", LayerType: gopacket.LayerTypePayload}
 	IPProtocolMetadata[IPProtocolIGMP] = EnumMetadata{DecodeWith: gopacket.DecodeFunc(decodeIGMP), Name: "IGMP", LayerType: LayerTypeIGMP}
 	IPProtocolMetadata[IPProtocolVRRP] = EnumMetadata{DecodeWith: gopacket.DecodeFunc(decodeVRRP), Name: "VRRP", LayerType: LayerTypeVRRP}
+	IPProtocolMetadata[253] = EnumMetadata{DecodeWith: gopacket.DecodeFunc(LayerTypeIFA.Decode), Name: "IFA", LayerType: LayerTypeIFA}
 
 	SCTPChunkTypeMetadata[SCTPChunkTypeData] = EnumMetadata{DecodeWith: gopacket.DecodeFunc(decodeSCTPData), Name: "Data"}
 	SCTPChunkTypeMetadata[SCTPChunkTypeInit] = EnumMetadata{DecodeWith: gopacket.DecodeFunc(decodeSCTPInit), Name: "Init"}

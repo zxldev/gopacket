@@ -41,9 +41,8 @@ func decodeIFA(data []byte, p gopacket.PacketBuilder) error {
 	// TODO: should we use the application layer
 	//       and create two layer type,
 	//       one for header and one for metadata
-	p.SetApplicationLayer(ifa)
-
-	return nil
+	//p.SetApplicationLayer(ifa)
+	return p.NextDecoder(ifa.NextLayerType())
 }
 
 /*
@@ -127,8 +126,18 @@ func (i *IFA) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 	if i.Header.TailStamp {
 		return fmt.Errorf("tail stamp metadata not supported")
 	}
+
 	if len(data) == 0 {
 		return nil
+	} else {
+		i.BaseLayer.Payload = data
+	}
+
+	if i.Header.NextHeader == IPProtocolUDP {
+		i.BaseLayer.Payload = data[:8]
+		data = data[8:]
+	} else if i.Header.NextHeader == IPProtocolTCP {
+		return fmt.Errorf("ip protocal not support")
 	}
 
 	// decode metadata header
@@ -138,13 +147,13 @@ func (i *IFA) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 		return nil
 	}
 
-	// validate metadata stack length
-	if len(data)%4 != 0 {
-		return fmt.Errorf(
-			"invalid metadata stack length, %d is not a multiple of 4 octets",
-			len(data))
-	}
-	if int(i.MetadataHeader.CurrentLength)*4 < len(data) {
+	//// validate metadata stack length
+	//if len(data)%4 != 0 {
+	//	return fmt.Errorf(
+	//		"invalid metadata stack length, %d is not a multiple of 4 octets",
+	//		len(data))
+	//}
+	if int(i.MetadataHeader.CurrentLength)*4 > len(data) {
 		return fmt.Errorf(
 			"invalid metadata stack length, expect %d got %d",
 			i.MetadataHeader.CurrentLength*4, len(data))
@@ -154,8 +163,6 @@ func (i *IFA) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 	// TODO: parse optional checksum header
 
 	// TODO: parse optional metadata fragmentation header
-
-	// TODO: skip layer 4 herader
 
 	// decode metadata
 	if !i.Header.TailStamp {
@@ -171,7 +178,7 @@ func (i *IFA) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 	}
 
 	if len(data) > 0 {
-		i.BaseLayer.Payload = data
+		i.BaseLayer.Payload = append(i.BaseLayer.Payload, data...)
 	}
 
 	return nil
@@ -348,6 +355,108 @@ func (m *IFAMetadata) decodeFromBytes(data *[]byte) error {
 
 	// remove what was read from buffer
 	*data = (*data)[m.Len():]
+
+	return nil
+}
+
+// SerializeTo writes the serialized form of this layer into the
+// SerializationBuffer, implementing gopacket.SerializableLayer.
+func (ip *IFA) SerializeTo(b gopacket.SerializeBuffer, opts gopacket.SerializeOptions) error {
+	ip.BaseLayer.Payload = make([]byte, len(b.Bytes()))
+	copy(ip.BaseLayer.Payload[:], b.Bytes())
+
+	isFirst := true
+	for _, v := range ip.Metadatas {
+		var err error
+		var metas []byte
+		if isFirst {
+			metas, err = b.PrependBytes(IFAMetadata{}.Len() - 8)
+			if err != nil {
+				return err
+			}
+			metas = b.Bytes()[:IFAMetadata{}.Len()]
+		} else {
+			metas, err = b.PrependBytes(IFAMetadata{}.Len())
+			if err != nil {
+				return err
+			}
+		}
+
+		metas[0] |= v.LocalNameSpace << 4
+
+		device := [4]byte{}
+		binary.BigEndian.PutUint32(device[:], v.DeviceID)
+		metas[1] = device[2]
+		metas[2] = device[3]
+		metas[0] |= device[1] & 0x0f
+
+		metas[3] = v.IPTTL
+
+		metas[4] |= uint8(v.EgressPortSpeed) << 4
+		metas[4] |= v.Congestion & 0xF0 << 2
+		metas[4] |= v.QueueID >> 4 & 0x03
+
+		metas[5] |= v.QueueID & 0x0F << 4
+
+		RXTimestampSeconds := [4]byte{}
+		binary.BigEndian.PutUint32(RXTimestampSeconds[:], v.RXTimestampSeconds)
+		metas[5] |= RXTimestampSeconds[1] & 0x0f
+		copy(metas[6:7], RXTimestampSeconds[2:4])
+		binary.BigEndian.PutUint16(metas[8:10], v.EgressSystemPort)
+		binary.BigEndian.PutUint16(metas[10:12], v.IngressSystemPort)
+		binary.BigEndian.PutUint32(metas[12:16], v.RXTimestampNanoSeconds)
+		binary.BigEndian.PutUint32(metas[16:20], v.ResidenceTime)
+		copy(metas[20:], v.Reserved[:])
+	}
+
+	bytes_ifa_header, err := b.PrependBytes(4)
+	if err != nil {
+		return err
+	}
+
+	bytes_ifa_header[0] = ip.MetadataHeader.RequestVector
+
+	bytes_ifa_header[1] &= 0x0
+	if ip.MetadataHeader.Loss {
+		bytes_ifa_header[1] |= 0x80
+	}
+	if ip.MetadataHeader.Color {
+		bytes_ifa_header[1] |= 0x40
+	}
+
+	bytes_ifa_header[2] = ip.MetadataHeader.HopLimit
+	bytes_ifa_header[3] = ip.MetadataHeader.CurrentLength
+
+	byteslayer4, err := b.PrependBytes(8)
+	if err != nil {
+		return err
+	}
+	copy(byteslayer4, ip.Payload()[:8])
+
+	bytes, err := b.PrependBytes(4)
+	if err != nil {
+		return err
+	}
+	bytes[0] = ip.Header.Version<<4 | ip.Header.GlobalNameSpace
+	bytes[1] = uint8(ip.Header.NextHeader)
+
+	if ip.Header.Checksum {
+		bytes[2] |= 0x01
+	}
+	if ip.Header.TurnAround {
+		bytes[2] |= 0x02
+	}
+	if ip.Header.Inband {
+		bytes[2] |= 0x04
+	}
+	if ip.Header.TailStamp {
+		bytes[2] |= 0x08
+	}
+	if ip.Header.MetadataFragment {
+		bytes[2] |= 0x10
+	}
+
+	bytes[3] = ip.Header.MaxLength
 
 	return nil
 }
